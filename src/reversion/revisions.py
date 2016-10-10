@@ -169,12 +169,20 @@ class RevisionContextManager(local):
                 if not self.is_invalid():
                     # Save the revision data.
                     for manager, manager_context in self._objects.iteritems():
-                        manager.save_revision(
-                            dict(
-                                (obj, callable(data) and data() or data)
+                        # somehow python can't compare two different models here
+                        # so we can't use model as dict key (as keys will be
+                        # replaced by wrong models because of broken comparison)
+                        # and switch to plain list here
+                        _list = [(obj, callable(data) and data() or data)
                                 for obj, data
-                                in manager_context.iteritems()
-                            ),
+                                in manager_context.iteritems()]
+                        manager.save_revision(
+                            _list,
+                            # dict(
+                            #     (obj, callable(data) and data() or data)
+                            #     for obj, data
+                            #     in manager_context.iteritems()
+                            # ),
                             user = self._user,
                             comment = self._comment,
                             meta = self._meta,
@@ -423,20 +431,34 @@ class RevisionManager(object):
         db = db or DEFAULT_DB_ALIAS
         # Adapt the objects to a dict.
         if isinstance(objects, (list, tuple)):
-            objects = dict(
-                (obj, self.get_adapter(obj.__class__).get_version_data(obj, VERSION_CHANGE, db))
-                for obj in objects
-            )
+            if not(objects and isinstance(objects[0], (list, tuple))):
+                objects = dict(
+                    (obj, self.get_adapter(obj.__class__).get_version_data(obj, VERSION_CHANGE, db))
+                    for obj in objects
+                )
         # Create the revision.
         if objects:
-            # Follow relationships.
-            for obj in self._follow_relationships(objects.iterkeys()):
-                if not obj in objects:
-                    adapter = self.get_adapter(obj.__class__)
-                    objects[obj] = adapter.get_version_data(obj, VERSION_CHANGE)
-            # Create all the versions without saving them
-            ordered_objects = list(objects.iterkeys())
-            new_versions = [Version(**objects[obj]) for obj in ordered_objects]
+            # added support for objects as list for case when objects can't be
+            # used as dict keys because of wrong comparison in context.end()
+            if isinstance(objects, (list, type)) and isinstance(objects[0], (list, tuple)):
+                obj_list = [row[0] for row in objects]
+                for obj in self._follow_relationships(obj_list):
+                    if obj not in obj_list:
+                        adapter = self.get_adapter(obj.__class__)
+                        objects.append((obj, adapter.get_version_data(obj, VERSION_CHANGE)))
+                ordered_objects = [row[0] for row in objects]
+                new_versions = [Version(**row[1]) for row in
+                                objects]
+            else:
+                # Follow relationships.
+                for obj in self._follow_relationships(objects.iterkeys()):
+                    if not obj in objects:
+                        adapter = self.get_adapter(obj.__class__)
+                        objects[obj] = adapter.get_version_data(obj, VERSION_CHANGE)
+                # Create all the versions without saving them
+                ordered_objects = list(objects.iterkeys())
+                new_versions = [Version(**objects[obj]) for obj in ordered_objects]
+
             # Check if there's some change in all the revision's objects.
             save_revision = True
             if ignore_duplicates:
